@@ -6,8 +6,16 @@ import (
 	"io"
 	"math"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/protoc-gen-go/descriptor"
+	"google.golang.org/protobuf/reflect/protoreflect"
+)
+
+const (
+	WireVarint     = 0
+	WireFixed32    = 5
+	WireFixed64    = 1
+	WireBytes      = 2
+	WireStartGroup = 3
+	WireEndGroup   = 4
 )
 
 // ErrOverflow is returned when an integer is too large to be represented.
@@ -17,27 +25,27 @@ var ErrOverflow = errors.New("proto: integer overflow")
 // is not valid.
 var ErrBadWireType = errors.New("proto: bad wiretype")
 
-var varintTypes = map[descriptor.FieldDescriptorProto_Type]bool{}
-var fixed32Types = map[descriptor.FieldDescriptorProto_Type]bool{}
-var fixed64Types = map[descriptor.FieldDescriptorProto_Type]bool{}
+var varintTypes = map[protoreflect.Kind]bool{}
+var fixed32Types = map[protoreflect.Kind]bool{}
+var fixed64Types = map[protoreflect.Kind]bool{}
 
 func init() {
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_BOOL] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_INT32] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_INT64] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_UINT32] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_UINT64] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_SINT32] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_SINT64] = true
-	varintTypes[descriptor.FieldDescriptorProto_TYPE_ENUM] = true
+	varintTypes[protoreflect.BoolKind] = true
+	varintTypes[protoreflect.Int32Kind] = true
+	varintTypes[protoreflect.Int64Kind] = true
+	varintTypes[protoreflect.Uint32Kind] = true
+	varintTypes[protoreflect.Uint64Kind] = true
+	varintTypes[protoreflect.Sint32Kind] = true
+	varintTypes[protoreflect.Sint64Kind] = true
+	varintTypes[protoreflect.EnumKind] = true
 
-	fixed32Types[descriptor.FieldDescriptorProto_TYPE_FIXED32] = true
-	fixed32Types[descriptor.FieldDescriptorProto_TYPE_SFIXED32] = true
-	fixed32Types[descriptor.FieldDescriptorProto_TYPE_FLOAT] = true
+	fixed32Types[protoreflect.Fixed32Kind] = true
+	fixed32Types[protoreflect.Sfixed32Kind] = true
+	fixed32Types[protoreflect.FloatKind] = true
 
-	fixed64Types[descriptor.FieldDescriptorProto_TYPE_FIXED64] = true
-	fixed64Types[descriptor.FieldDescriptorProto_TYPE_SFIXED64] = true
-	fixed64Types[descriptor.FieldDescriptorProto_TYPE_DOUBLE] = true
+	fixed64Types[protoreflect.Fixed64Kind] = true
+	fixed64Types[protoreflect.Sfixed64Kind] = true
+	fixed64Types[protoreflect.DoubleKind] = true
 }
 
 func (cb *Buffer) decodeVarintSlow() (x uint64, err error) {
@@ -323,15 +331,15 @@ func (cb *Buffer) findGroupEnd() (groupEnd int, dataEnd int, err error) {
 		}
 		// skip past the field's data
 		switch wireType {
-		case proto.WireFixed32:
+		case WireFixed32:
 			if err := cb.Skip(4); err != nil {
 				return 0, 0, err
 			}
-		case proto.WireFixed64:
+		case WireFixed64:
 			if err := cb.Skip(8); err != nil {
 				return 0, 0, err
 			}
-		case proto.WireVarint:
+		case WireVarint:
 			// skip varint by finding last byte (has high bit unset)
 			i := cb.index
 			limit := i + 10 // varint cannot be >10 bytes
@@ -351,7 +359,7 @@ func (cb *Buffer) findGroupEnd() (groupEnd int, dataEnd int, err error) {
 			// read the last byte. This is not a real/feasible concern on 64-bit
 			// systems. Something to worry about for 32-bit systems? Do we care?
 			cb.index = i + 1
-		case proto.WireBytes:
+		case WireBytes:
 			l, err := cb.DecodeVarint()
 			if err != nil {
 				return 0, 0, err
@@ -359,11 +367,11 @@ func (cb *Buffer) findGroupEnd() (groupEnd int, dataEnd int, err error) {
 			if err := cb.Skip(int(l)); err != nil {
 				return 0, 0, err
 			}
-		case proto.WireStartGroup:
+		case WireStartGroup:
 			if err := cb.SkipGroup(); err != nil {
 				return 0, 0, err
 			}
-		case proto.WireEndGroup:
+		case WireEndGroup:
 			return cb.index, fieldStart, nil
 		default:
 			return 0, 0, ErrBadWireType

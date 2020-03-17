@@ -3,11 +3,11 @@ package codec_test
 import (
 	"testing"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/jhump/protoreflect/codec"
-	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
 	"github.com/jhump/protoreflect/internal/testprotos"
 	"github.com/jhump/protoreflect/internal/testutil"
 )
@@ -31,17 +31,12 @@ func TestEncodeMessage(t *testing.T) {
 		B: []byte{3, 2, 1, 0},
 	}
 
-	// A generated message will be encoded using its MarshalAppend and
-	// MarshalAppendDeterministic methods
-	md, err := desc.LoadMessageDescriptorForMessage(pm)
-	testutil.Ok(t, err)
-	dm := dynamic.NewMessage(md)
-	err = dm.ConvertFrom(pm)
-	testutil.Ok(t, err)
-
-	// This custom message will use MarshalDeterministic method or fall back to
-	// old proto.Marshal implementation for non-deterministic marshaling
-	cm := (*TestMessage)(pm)
+	md := pm.ProtoReflect().Descriptor()
+	dm := dynamicpb.NewMessage(md)
+	pm.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		setDynamicField(dm, fd, v)
+		return true
+	})
 
 	testCases := []struct {
 		Name string
@@ -49,7 +44,6 @@ func TestEncodeMessage(t *testing.T) {
 	}{
 		{Name: "generated", Msg: pm},
 		{Name: "dynamic", Msg: dm},
-		{Name: "custom", Msg: cm},
 	}
 	dels := []struct {
 		Name      string
@@ -120,7 +114,7 @@ func TestEncodeMessage(t *testing.T) {
 						// marshal method; so verify that unmarshaling the bytes
 						// results in an equal message as the original
 						var pm2 testprotos.Test
-						err = proto.Unmarshal(b, &pm2)
+						err := proto.Unmarshal(b, &pm2)
 						testutil.Ok(t, err)
 
 						testutil.Require(t, proto.Equal(pm, &pm2))
@@ -135,10 +129,8 @@ func TestEncodeMessage(t *testing.T) {
 // So we focus on serialization of groups and the various kinds of proto.Message
 // implementations that can back them (similar to TestEncodeMessage above).
 func TestEncodeFieldValue_Group(t *testing.T) {
-	atmMd, err := desc.LoadMessageDescriptorForMessage((*testprotos.AnotherTestMessage)(nil))
-	testutil.Ok(t, err)
-
-	rrFd := atmMd.FindFieldByNumber(6) // tag 6 is the group
+	atmMd := (&testprotos.AnotherTestMessage{}).ProtoReflect().Descriptor()
+	rrFd := atmMd.Fields().ByNumber(6) // tag 6 is the group
 
 	// A generated message will be encoded using its XXX_Size and XXX_Marshal
 	// methods
@@ -148,17 +140,12 @@ func TestEncodeFieldValue_Group(t *testing.T) {
 		Doors:   proto.String("Strange Days"),
 	}
 
-	// A generated message will be encoded using its MarshalAppend and
-	// MarshalAppendDeterministic methods
-	md, err := desc.LoadMessageDescriptorForMessage(pm)
-	testutil.Ok(t, err)
-	dm := dynamic.NewMessage(md)
-	err = dm.ConvertFrom(pm)
-	testutil.Ok(t, err)
-
-	// This custom message will use MarshalDeterministic method or fall back to
-	// old proto.Marshal implementation for non-deterministic marshaling
-	cm := (*TestGroup)(pm)
+	md := pm.ProtoReflect().Descriptor()
+	dm := dynamicpb.NewMessage(md)
+	pm.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		setDynamicField(dm, fd, v)
+		return true
+	})
 
 	testCases := []struct {
 		Name string
@@ -166,7 +153,6 @@ func TestEncodeFieldValue_Group(t *testing.T) {
 	}{
 		{Name: "generated", Msg: pm},
 		{Name: "dynamic", Msg: dm},
-		{Name: "custom", Msg: cm},
 	}
 
 	dets := []struct {
@@ -210,47 +196,23 @@ func TestEncodeFieldValue_Group(t *testing.T) {
 	}
 }
 
-type TestMessage testprotos.Test
-
-func (m *TestMessage) Reset() {
-	(*testprotos.Test)(m).Reset()
-}
-
-func (m *TestMessage) String() string {
-	return (*testprotos.Test)(m).String()
-}
-
-func (m *TestMessage) ProtoMessage() {
-}
-
-func (m *TestMessage) MarshalDeterministic() ([]byte, error) {
-	t := (*testprotos.Test)(m)
-	sz := t.XXX_Size()
-	b := make([]byte, 0, sz)
-	return t.XXX_Marshal(b, true)
-}
-
-type TestGroup testprotos.AnotherTestMessage_RockNRoll
-
-func (m *TestGroup) Reset() {
-	(*testprotos.AnotherTestMessage_RockNRoll)(m).Reset()
-}
-
-func (m *TestGroup) String() string {
-	return (*testprotos.AnotherTestMessage_RockNRoll)(m).String()
-}
-
-func (m *TestGroup) ProtoMessage() {
-}
-
-func (m *TestGroup) MarshalDeterministic() ([]byte, error) {
-	t := (*testprotos.AnotherTestMessage_RockNRoll)(m)
-	sz := t.XXX_Size()
-	b := make([]byte, 0, sz)
-	return t.XXX_Marshal(b, true)
-}
-
-func init() {
-	proto.RegisterType((*TestMessage)(nil), "foo.bar.v2.TestMessage")
-	proto.RegisterType((*TestGroup)(nil), "foo.bar.v2.TestGroup")
+func setDynamicField(dm *dynamicpb.Message, fd protoreflect.FieldDescriptor, v protoreflect.Value) {
+	if fd.IsList() {
+		dm.Clear(fd)
+		lv := v.List()
+		mut := dm.Mutable(fd).List()
+		for i := 0; i < lv.Len(); i++ {
+			mut.Append(lv.Get(i))
+		}
+	} else if fd.IsMap() {
+		dm.Clear(fd)
+		mv := v.Map()
+		mut := dm.Mutable(fd).Map()
+		mv.Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
+			mut.Set(k, v)
+			return true
+		})
+	} else {
+		dm.Set(fd, v)
+	}
 }

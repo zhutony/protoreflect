@@ -6,10 +6,8 @@ import (
 	"io"
 	"math"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/golang/protobuf/protoc-gen-go/descriptor"
-
-	"github.com/jhump/protoreflect/desc"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // ErrWireTypeEndGroup is returned from DecodeFieldValue if the tag and wire-type
@@ -22,7 +20,7 @@ var ErrWireTypeEndGroup = errors.New("unexpected wire type: end group")
 // Also see MessageFactory in "github.com/jhump/protoreflect/dynamic", which
 // implements this interface.
 type MessageFactory interface {
-	NewMessage(md *desc.MessageDescriptor) proto.Message
+	NewMessage(md protoreflect.MessageDescriptor) proto.Message
 }
 
 // UnknownField represents a field that was parsed from the binary wire
@@ -34,10 +32,9 @@ type UnknownField struct {
 	Tag int32
 
 	// Encoding indicates how the unknown field was encoded on the wire. If it
-	// is proto.WireBytes or proto.WireGroupStart then Contents will be set to
-	// the raw bytes. If it is proto.WireTypeFixed32 then the data is in the least
-	// significant 32 bits of Value. Otherwise, the data is in all 64 bits of
-	// Value.
+	// is WireBytes or WireGroupStart then Contents will be set to the raw
+	// bytes. If it is WireTypeFixed32 then the data is in the least significant
+	// 32 bits of Value. Otherwise, the data is in all 64 bits of Value.
 	Encoding int8
 	Contents []byte
 	Value    uint64
@@ -55,7 +52,7 @@ type UnknownField struct {
 // If the field descriptor returned is nil, that means that the given function
 // returned nil. This is expected to happen for unrecognized tag numbers. In
 // that case, no error is returned, and the value will be an UnknownField.
-func (cb *Buffer) DecodeFieldValue(fieldFinder func(int32) *desc.FieldDescriptor, fact MessageFactory) (*desc.FieldDescriptor, interface{}, error) {
+func (cb *Buffer) DecodeFieldValue(fieldFinder func(int32) protoreflect.FieldDescriptor, fact MessageFactory) (protoreflect.FieldDescriptor, interface{}, error) {
 	if cb.EOF() {
 		return nil, nil, io.EOF
 	}
@@ -63,7 +60,7 @@ func (cb *Buffer) DecodeFieldValue(fieldFinder func(int32) *desc.FieldDescriptor
 	if err != nil {
 		return nil, nil, err
 	}
-	if wireType == proto.WireEndGroup {
+	if wireType == WireEndGroup {
 		return nil, tagNumber, ErrWireTypeEndGroup
 	}
 	fd := fieldFinder(tagNumber)
@@ -80,60 +77,56 @@ func (cb *Buffer) DecodeFieldValue(fieldFinder func(int32) *desc.FieldDescriptor
 // generated structs use for the field descriptor's type. Enum types will return
 // an int32. If the given field type uses length-delimited encoding (nested
 // messages, bytes, and strings), an error is returned.
-func DecodeScalarField(fd *desc.FieldDescriptor, v uint64) (interface{}, error) {
-	switch fd.GetType() {
-	case descriptor.FieldDescriptorProto_TYPE_BOOL:
+func DecodeScalarField(fd protoreflect.FieldDescriptor, v uint64) (interface{}, error) {
+	switch fd.Kind() {
+	case protoreflect.BoolKind:
 		return v != 0, nil
-	case descriptor.FieldDescriptorProto_TYPE_UINT32,
-		descriptor.FieldDescriptorProto_TYPE_FIXED32:
+	case protoreflect.Uint32Kind, protoreflect.Fixed32Kind:
 		if v > math.MaxUint32 {
 			return nil, ErrOverflow
 		}
 		return uint32(v), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_INT32,
-		descriptor.FieldDescriptorProto_TYPE_ENUM:
+	case protoreflect.Int32Kind, protoreflect.EnumKind:
 		s := int64(v)
 		if s > math.MaxInt32 || s < math.MinInt32 {
 			return nil, ErrOverflow
 		}
 		return int32(s), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_SFIXED32:
+	case protoreflect.Sfixed32Kind:
 		if v > math.MaxUint32 {
 			return nil, ErrOverflow
 		}
 		return int32(v), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_SINT32:
+	case protoreflect.Sint32Kind:
 		if v > math.MaxUint32 {
 			return nil, ErrOverflow
 		}
 		return DecodeZigZag32(v), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_UINT64,
-		descriptor.FieldDescriptorProto_TYPE_FIXED64:
+	case protoreflect.Uint64Kind, protoreflect.Fixed64Kind:
 		return v, nil
 
-	case descriptor.FieldDescriptorProto_TYPE_INT64,
-		descriptor.FieldDescriptorProto_TYPE_SFIXED64:
+	case protoreflect.Int64Kind, protoreflect.Sfixed64Kind:
 		return int64(v), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_SINT64:
+	case protoreflect.Sint64Kind:
 		return DecodeZigZag64(v), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_FLOAT:
+	case protoreflect.FloatKind:
 		if v > math.MaxUint32 {
 			return nil, ErrOverflow
 		}
 		return math.Float32frombits(uint32(v)), nil
 
-	case descriptor.FieldDescriptorProto_TYPE_DOUBLE:
+	case protoreflect.DoubleKind:
 		return math.Float64frombits(v), nil
 
 	default:
 		// bytes, string, message, and group cannot be represented as a simple numeric value
-		return nil, fmt.Errorf("bad input; field %s requires length-delimited wire type", fd.GetFullyQualifiedName())
+		return nil, fmt.Errorf("bad input; field %s requires length-delimited wire type", fd.FullName())
 	}
 }
 
@@ -147,17 +140,17 @@ func DecodeScalarField(fd *desc.FieldDescriptor, v uint64) (interface{}, error) 
 // to repeated. New code may emit a packed repeated representation, but old code
 // still expects a single scalar value. In this case, if the actual data in bytes
 // contains multiple values, only the last value is returned.
-func DecodeLengthDelimitedField(fd *desc.FieldDescriptor, bytes []byte, mf MessageFactory) (interface{}, error) {
+func DecodeLengthDelimitedField(fd protoreflect.FieldDescriptor, bytes []byte, mf MessageFactory) (interface{}, error) {
 	switch {
-	case fd.GetType() == descriptor.FieldDescriptorProto_TYPE_BYTES:
+	case fd.Kind() == protoreflect.BytesKind:
 		return bytes, nil
 
-	case fd.GetType() == descriptor.FieldDescriptorProto_TYPE_STRING:
+	case fd.Kind() == protoreflect.StringKind:
 		return string(bytes), nil
 
-	case fd.GetType() == descriptor.FieldDescriptorProto_TYPE_MESSAGE ||
-		fd.GetType() == descriptor.FieldDescriptorProto_TYPE_GROUP:
-		msg := mf.NewMessage(fd.GetMessageType())
+	case fd.Kind() == protoreflect.MessageKind ||
+		fd.Kind() == protoreflect.GroupKind:
+		msg := mf.NewMessage(fd.Message())
 		err := proto.Unmarshal(bytes, msg)
 		if err != nil {
 			return nil, err
@@ -175,14 +168,14 @@ func DecodeLengthDelimitedField(fd *desc.FieldDescriptor, bytes []byte, mf Messa
 		for !packedBuf.EOF() {
 			var v uint64
 			var err error
-			if varintTypes[fd.GetType()] {
+			if varintTypes[fd.Kind()] {
 				v, err = packedBuf.DecodeVarint()
-			} else if fixed32Types[fd.GetType()] {
+			} else if fixed32Types[fd.Kind()] {
 				v, err = packedBuf.DecodeFixed32()
-			} else if fixed64Types[fd.GetType()] {
+			} else if fixed64Types[fd.Kind()] {
 				v, err = packedBuf.DecodeFixed64()
 			} else {
-				return nil, fmt.Errorf("bad input; cannot parse length-delimited wire type for field %s", fd.GetFullyQualifiedName())
+				return nil, fmt.Errorf("bad input; cannot parse length-delimited wire type for field %s", fd.FullName())
 			}
 			if err != nil {
 				return nil, err
@@ -191,11 +184,11 @@ func DecodeLengthDelimitedField(fd *desc.FieldDescriptor, bytes []byte, mf Messa
 			if err != nil {
 				return nil, err
 			}
-			if fd.IsRepeated() {
+			if fd.Cardinality() == protoreflect.Repeated {
 				slice = append(slice, val)
 			}
 		}
-		if fd.IsRepeated() {
+		if fd.Cardinality() == protoreflect.Repeated {
 			return slice, nil
 		} else {
 			// if not a repeated field, last value wins
@@ -204,42 +197,42 @@ func DecodeLengthDelimitedField(fd *desc.FieldDescriptor, bytes []byte, mf Messa
 	}
 }
 
-func (b *Buffer) decodeKnownField(fd *desc.FieldDescriptor, encoding int8, fact MessageFactory) (interface{}, error) {
+func (b *Buffer) decodeKnownField(fd protoreflect.FieldDescriptor, encoding int8, fact MessageFactory) (interface{}, error) {
 	var val interface{}
 	var err error
 	switch encoding {
-	case proto.WireFixed32:
+	case WireFixed32:
 		var num uint64
 		num, err = b.DecodeFixed32()
 		if err == nil {
 			val, err = DecodeScalarField(fd, num)
 		}
-	case proto.WireFixed64:
+	case WireFixed64:
 		var num uint64
 		num, err = b.DecodeFixed64()
 		if err == nil {
 			val, err = DecodeScalarField(fd, num)
 		}
-	case proto.WireVarint:
+	case WireVarint:
 		var num uint64
 		num, err = b.DecodeVarint()
 		if err == nil {
 			val, err = DecodeScalarField(fd, num)
 		}
 
-	case proto.WireBytes:
-		alloc := fd.GetType() == descriptor.FieldDescriptorProto_TYPE_BYTES
+	case WireBytes:
+		alloc := fd.Kind() == protoreflect.BytesKind
 		var raw []byte
 		raw, err = b.DecodeRawBytes(alloc)
 		if err == nil {
 			val, err = DecodeLengthDelimitedField(fd, raw, fact)
 		}
 
-	case proto.WireStartGroup:
-		if fd.GetMessageType() == nil {
-			return nil, fmt.Errorf("cannot parse field %s from group-encoded wire type", fd.GetFullyQualifiedName())
+	case WireStartGroup:
+		if fd.Message() == nil {
+			return nil, fmt.Errorf("cannot parse field %s from group-encoded wire type", fd.FullName())
 		}
-		msg := fact.NewMessage(fd.GetMessageType())
+		msg := fact.NewMessage(fd.Message())
 		var data []byte
 		data, err = b.ReadGroup(false)
 		if err == nil {
@@ -263,15 +256,15 @@ func (b *Buffer) decodeUnknownField(tagNumber int32, encoding int8) (interface{}
 	u := UnknownField{Tag: tagNumber, Encoding: encoding}
 	var err error
 	switch encoding {
-	case proto.WireFixed32:
+	case WireFixed32:
 		u.Value, err = b.DecodeFixed32()
-	case proto.WireFixed64:
+	case WireFixed64:
 		u.Value, err = b.DecodeFixed64()
-	case proto.WireVarint:
+	case WireVarint:
 		u.Value, err = b.DecodeVarint()
-	case proto.WireBytes:
+	case WireBytes:
 		u.Contents, err = b.DecodeRawBytes(true)
-	case proto.WireStartGroup:
+	case WireStartGroup:
 		u.Contents, err = b.ReadGroup(true)
 	default:
 		err = ErrBadWireType
