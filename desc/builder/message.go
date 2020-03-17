@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"sort"
 
 	"github.com/golang/protobuf/proto"
@@ -22,9 +23,9 @@ import (
 type MessageBuilder struct {
 	baseBuilder
 
-	Options         *dpb.MessageOptions
-	ExtensionRanges []*dpb.DescriptorProto_ExtensionRange
-	ReservedRanges  []*dpb.DescriptorProto_ReservedRange
+	Options         *descriptorpb.MessageOptions
+	ExtensionRanges []*descriptorpb.DescriptorProto_ExtensionRange
+	ReservedRanges  []*descriptorpb.DescriptorProto_ReservedRange
 	ReservedNames   []string
 
 	fieldsAndOneOfs  []Builder

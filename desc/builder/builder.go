@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/golang/protobuf/proto"
-	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
-
-	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 // Builder is the core interface implemented by all descriptor builders. It
@@ -67,7 +66,7 @@ type Builder interface {
 	// the calling program (i.e. linked in and registered with the proto
 	// package) can be correctly interpreted. If the builder references other
 	// custom options, use BuilderOptions.Build instead.
-	BuildDescriptor() (desc.Descriptor, error)
+	BuildDescriptor() (protoreflect.Descriptor, error)
 
 	// findChild returns the child builder with the given name or nil if this
 	// builder has no such child.
@@ -98,7 +97,7 @@ type BuilderOptions struct {
 	// refers to an option that is not known by this registry, it can still be
 	// interpreted if the extension is "known" to the calling program (i.e.
 	// linked in and registered with the proto package).
-	Extensions *dynamic.ExtensionRegistry
+	Extensions protoregistry.ExtensionTypeResolver
 
 	// If this option is true, then all options referred to in builders must
 	// be interpreted. That means that if an option is present that is neither
@@ -110,7 +109,7 @@ type BuilderOptions struct {
 // Build processes the given builder into a descriptor using these options.
 // Using the builder's Build() or BuildDescriptor() method is equivalent to
 // building with a zero-value BuilderOptions.
-func (opts BuilderOptions) Build(b Builder) (desc.Descriptor, error) {
+func (opts BuilderOptions) Build(b Builder) (protoreflect.Descriptor, error) {
 	return doBuild(b, opts)
 }
 
@@ -125,13 +124,13 @@ type Comments struct {
 	TrailingComment         string
 }
 
-func setComments(c *Comments, loc *dpb.SourceCodeInfo_Location) {
+func setComments(c *Comments, loc *descriptorpb.SourceCodeInfo_Location) {
 	c.LeadingDetachedComments = loc.GetLeadingDetachedComments()
 	c.LeadingComment = loc.GetLeadingComments()
 	c.TrailingComment = loc.GetTrailingComments()
 }
 
-func addCommentsTo(sourceInfo *dpb.SourceCodeInfo, path []int32, c *Comments) {
+func addCommentsTo(sourceInfo *descriptorpb.SourceCodeInfo, path []int32, c *Comments) {
 	var lead, trail *string
 	if c.LeadingComment != "" {
 		lead = proto.String(c.LeadingComment)
@@ -150,7 +149,7 @@ func addCommentsTo(sourceInfo *dpb.SourceCodeInfo, path []int32, c *Comments) {
 		copy(detached, c.LeadingDetachedComments)
 	}
 
-	sourceInfo.Location = append(sourceInfo.Location, &dpb.SourceCodeInfo_Location{
+	sourceInfo.Location = append(sourceInfo.Location, &descriptorpb.SourceCodeInfo_Location{
 		LeadingDetachedComments: detached,
 		LeadingComments:         lead,
 		TrailingComments:        trail,
@@ -330,7 +329,7 @@ func (b *baseBuilder) GetComments() *Comments {
 
 // doBuild is a helper for implementing the Build() method that each builder
 // exposes. It is used for all builders except for the root FileBuilder type.
-func doBuild(b Builder, opts BuilderOptions) (desc.Descriptor, error) {
+func doBuild(b Builder, opts BuilderOptions) (protoreflect.Descriptor, error) {
 	fd, err := newResolver(opts).resolveElement(b, nil)
 	if err != nil {
 		return nil, err
@@ -338,7 +337,98 @@ func doBuild(b Builder, opts BuilderOptions) (desc.Descriptor, error) {
 	if _, ok := b.(*FileBuilder); ok {
 		return fd, nil
 	}
-	return fd.FindSymbol(GetFullyQualifiedName(b)), nil
+	return findSymbol(fd, protoreflect.FullName(GetFullyQualifiedName(b))), nil
+}
+
+func findSymbolInFile(fd protoreflect.FileDescriptor, fullName protoreflect.FullName) protoreflect.Descriptor {
+	if ret := findSymbol(fd, fullName); ret != nil {
+		return ret
+	}
+
+	svcs := fd.Services()
+	for i := 0; i < svcs.Len(); i++ {
+		sd := svcs.Get(i)
+		if sd.FullName() == fullName {
+			return sd
+		}
+		meths := sd.Methods()
+		for j := 0; j < meths.Len(); j++ {
+			mtd := meths.Get(j)
+			if mtd.FullName() == fullName {
+				return mtd
+			}
+		}
+	}
+
+	return nil
+}
+
+func findSymbolInMessage(md protoreflect.MessageDescriptor, fullName protoreflect.FullName) protoreflect.Descriptor {
+	if ret := findSymbol(md, fullName); ret != nil {
+		return ret
+	}
+
+	flds := md.Fields()
+	for i := 0; i < flds.Len(); i++ {
+		fd := flds.Get(i)
+		if fd.FullName() == fullName {
+			return fd
+		}
+	}
+
+	oneofs := md.Oneofs()
+	for i := 0; i < oneofs.Len(); i++ {
+		ood := oneofs.Get(i)
+		if ood.FullName() == fullName {
+			return ood
+		}
+	}
+
+	return nil
+}
+
+type namespace interface {
+	Messages() protoreflect.MessageDescriptors
+	Enums() protoreflect.EnumDescriptors
+	Extensions() protoreflect.ExtensionDescriptors
+}
+
+func findSymbol(ns namespace, fullName protoreflect.FullName) protoreflect.Descriptor {
+	msgs := ns.Messages()
+	for i := 0; i < msgs.Len(); i++ {
+		md := msgs.Get(i)
+		if md.FullName() == fullName {
+			return md
+		}
+		if ret := findSymbolInMessage(md, fullName); ret != nil {
+			return ret
+		}
+	}
+
+	exts := ns.Extensions()
+	for i := 0; i < exts.Len(); i++ {
+		ed := exts.Get(i)
+		if ed.FullName() == fullName {
+			return ed
+		}
+	}
+
+	enums := ns.Enums()
+	for i := 0; i < enums.Len(); i++ {
+		ed := enums.Get(i)
+		if ed.FullName() == fullName {
+			return ed
+		}
+		vals := ed.Values()
+		for j := 0; j < vals.Len(); j++ {
+			evd := vals.Get(j)
+			if evd.FullName() == fullName {
+				return evd
+			}
+		}
+	}
+
+	return nil
 }
 
 func getFullyQualifiedName(b Builder, buf *bytes.Buffer) {
@@ -368,10 +458,10 @@ func getFullyQualifiedName(b Builder, buf *bytes.Buffer) {
 // GetFullyQualifiedName returns the given builder's fully-qualified name. This
 // name is based on the parent elements the builder may be linked to, which
 // provide context like package and (optional) enclosing message names.
-func GetFullyQualifiedName(b Builder) string {
+func GetFullyQualifiedName(b Builder) protoreflect.FullName {
 	var buf bytes.Buffer
 	getFullyQualifiedName(b, &buf)
-	return buf.String()
+	return protoreflect.FullName(buf.String())
 }
 
 // Unlink removes the given builder from its parent. The parent will no longer

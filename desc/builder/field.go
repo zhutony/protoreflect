@@ -2,6 +2,8 @@ package builder
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"strings"
 	"unicode"
 
@@ -23,7 +25,7 @@ import (
 // built).
 type FieldBuilder struct {
 	baseBuilder
-	number int32
+	number protoreflect.FieldNumber
 
 	// msgType is populated for fields that have a "private" message type that
 	// isn't expected to be referenced elsewhere. This happens for map fields,
@@ -32,12 +34,12 @@ type FieldBuilder struct {
 	msgType   *MessageBuilder
 	fieldType *FieldType
 
-	Options  *dpb.FieldOptions
-	Label    dpb.FieldDescriptorProto_Label
+	Options  *descriptorpb.FieldOptions
+	Label    descriptorpb.FieldDescriptorProto_Label
 	Default  string
 	JsonName string
 
-	foreignExtendee *desc.MessageDescriptor
+	foreignExtendee protoreflect.MessageDescriptor
 	localExtendee   *MessageBuilder
 }
 
@@ -473,9 +475,9 @@ func (flb *FieldBuilder) IsExtension() bool {
 
 // GetExtendeeTypeName returns the fully qualified name of the extended message
 // or it returns an empty string if this is not an extension field.
-func (flb *FieldBuilder) GetExtendeeTypeName() string {
+func (flb *FieldBuilder) GetExtendeeTypeName() protoreflect.FullName {
 	if flb.foreignExtendee != nil {
-		return flb.foreignExtendee.GetFullyQualifiedName()
+		return flb.foreignExtendee.FullName()
 	} else if flb.localExtendee != nil {
 		return GetFullyQualifiedName(flb.localExtendee)
 	} else {
@@ -548,7 +550,7 @@ func (flb *FieldBuilder) BuildDescriptor() (desc.Descriptor, error) {
 type OneOfBuilder struct {
 	baseBuilder
 
-	Options *dpb.OneofOptions
+	Options *descriptorpb.OneofOptions
 
 	choices []*FieldBuilder
 	symbols map[string]*FieldBuilder

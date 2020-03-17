@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
 
@@ -17,9 +18,9 @@ import (
 // There are numerous factory methods for creating FieldType instances.
 type FieldType struct {
 	fieldType       dpb.FieldDescriptorProto_Type
-	foreignMsgType  *desc.MessageDescriptor
+	foreignMsgType  protoreflect.MessageDescriptor
 	localMsgType    *MessageBuilder
-	foreignEnumType *desc.EnumDescriptor
+	foreignEnumType protoreflect.EnumDescriptor
 	localEnumType   *EnumBuilder
 }
 
@@ -207,7 +208,7 @@ func fieldTypeFromDescriptor(fld *desc.FieldDescriptor) *FieldType {
 type RpcType struct {
 	IsStream bool
 
-	foreignType *desc.MessageDescriptor
+	foreignType protoreflect.MessageDescriptor
 	localType   *MessageBuilder
 }
 

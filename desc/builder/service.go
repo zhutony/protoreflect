@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/golang/protobuf/proto"
 	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
@@ -16,7 +17,7 @@ import (
 type ServiceBuilder struct {
 	baseBuilder
 
-	Options *dpb.ServiceOptions
+	Options *descriptorpb.ServiceOptions
 
 	methods []*MethodBuilder
 	symbols map[string]*MethodBuilder
@@ -236,7 +237,7 @@ func (sb *ServiceBuilder) BuildDescriptor() (desc.Descriptor, error) {
 type MethodBuilder struct {
 	baseBuilder
 
-	Options  *dpb.MethodOptions
+	Options  *descriptorpb.MethodOptions
 	ReqType  *RpcType
 	RespType *RpcType
 }

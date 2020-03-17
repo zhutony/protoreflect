@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/golang/protobuf/proto"
-	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/internal"
 )
 
@@ -17,8 +17,8 @@ import (
 type EnumBuilder struct {
 	baseBuilder
 
-	Options        *dpb.EnumOptions
-	ReservedRanges []*dpb.EnumDescriptorProto_EnumReservedRange
+	Options        *descriptorpb.EnumOptions
+	ReservedRanges []*descriptorpb.EnumDescriptorProto_EnumReservedRange
 	ReservedNames  []string
 
 	values  []*EnumValueBuilder
@@ -47,26 +47,26 @@ func NewEnum(name string) *EnumBuilder {
 // This means that enum builders created from descriptors do not need to be
 // explicitly assigned to a file in order to preserve the original enum's
 // package name.
-func FromEnum(ed *desc.EnumDescriptor) (*EnumBuilder, error) {
-	if fb, err := FromFile(ed.GetFile()); err != nil {
+func FromEnum(ed protoreflect.EnumDescriptor) (*EnumBuilder, error) {
+	if fb, err := FromFile(ed.ParentFile()); err != nil {
 		return nil, err
-	} else if eb, ok := fb.findFullyQualifiedElement(ed.GetFullyQualifiedName()).(*EnumBuilder); ok {
+	} else if eb, ok := fb.findFullyQualifiedElement(ed.FullName()).(*EnumBuilder); ok {
 		return eb, nil
 	} else {
-		return nil, fmt.Errorf("could not find enum %s after converting file %q to builder", ed.GetFullyQualifiedName(), ed.GetFile().GetName())
+		return nil, fmt.Errorf("could not find enum %s after converting file %q to builder", ed.FullName(), ed.ParentFile().Name())
 	}
 }
 
-func fromEnum(ed *desc.EnumDescriptor, localEnums map[*desc.EnumDescriptor]*EnumBuilder) (*EnumBuilder, error) {
-	eb := NewEnum(ed.GetName())
-	eb.Options = ed.GetEnumOptions()
+func fromEnum(ed protoreflect.EnumDescriptor, localEnums map[protoreflect.EnumDescriptor]*EnumBuilder) (*EnumBuilder, error) {
+	eb := NewEnum(ed.Name())
+	eb.Options = ed.Options().(*descriptorpb.EnumOptions)
 	eb.ReservedRanges = ed.AsEnumDescriptorProto().GetReservedRange()
 	eb.ReservedNames = ed.AsEnumDescriptorProto().GetReservedName()
 	setComments(&eb.comments, ed.GetSourceInfo())
 
 	localEnums[ed] = eb
 
-	for _, evd := range ed.GetValues() {
+	for _, evd := range ed.Values() {
 		if evb, err := fromEnumValue(evd); err != nil {
 			return nil, err
 		} else if err := eb.TryAddValue(evb); err != nil {
@@ -146,7 +146,7 @@ func (eb *EnumBuilder) addSymbol(b *EnumValueBuilder) error {
 
 // SetOptions sets the enum options for this enum and returns the enum, for
 // method chaining.
-func (eb *EnumBuilder) SetOptions(options *dpb.EnumOptions) *EnumBuilder {
+func (eb *EnumBuilder) SetOptions(options *descriptorpb.EnumOptions) *EnumBuilder {
 	eb.Options = options
 	return eb
 }
@@ -202,7 +202,7 @@ func (eb *EnumBuilder) TryAddValue(evb *EnumValueBuilder) error {
 // inclusive of both the start and end, just like defining a range in proto IDL
 // source. This returns the message, for method chaining.
 func (eb *EnumBuilder) AddReservedRange(start, end int32) *EnumBuilder {
-	rr := &dpb.EnumDescriptorProto_EnumReservedRange{
+	rr := &descriptorpb.EnumDescriptorProto_EnumReservedRange{
 		Start: proto.Int32(start),
 		End:   proto.Int32(end),
 	}
@@ -212,7 +212,7 @@ func (eb *EnumBuilder) AddReservedRange(start, end int32) *EnumBuilder {
 
 // SetReservedRanges replaces all of this enum's reserved ranges with the
 // given slice of ranges. This returns the enum, for method chaining.
-func (eb *EnumBuilder) SetReservedRanges(ranges []*dpb.EnumDescriptorProto_EnumReservedRange) *EnumBuilder {
+func (eb *EnumBuilder) SetReservedRanges(ranges []*descriptorpb.EnumDescriptorProto_EnumReservedRange) *EnumBuilder {
 	eb.ReservedRanges = ranges
 	return eb
 }
@@ -231,11 +231,11 @@ func (eb *EnumBuilder) SetReservedNames(names []string) *EnumBuilder {
 	return eb
 }
 
-func (eb *EnumBuilder) buildProto(path []int32, sourceInfo *dpb.SourceCodeInfo) (*dpb.EnumDescriptorProto, error) {
+func (eb *EnumBuilder) buildProto(path []int32, sourceInfo *descriptorpb.SourceCodeInfo) (*descriptorpb.EnumDescriptorProto, error) {
 	addCommentsTo(sourceInfo, path, &eb.comments)
 
-	var needNumbersAssigned []*dpb.EnumValueDescriptorProto
-	values := make([]*dpb.EnumValueDescriptorProto, 0, len(eb.values))
+	var needNumbersAssigned []*descriptorpb.EnumValueDescriptorProto
+	values := make([]*descriptorpb.EnumValueDescriptorProto, 0, len(eb.values))
 	for _, evb := range eb.values {
 		path := append(path, internal.Enum_valuesTag, int32(len(values)))
 		evp, err := evb.buildProto(path, sourceInfo)
@@ -275,7 +275,7 @@ func (eb *EnumBuilder) buildProto(path []int32, sourceInfo *dpb.SourceCodeInfo) 
 		}
 	}
 
-	return &dpb.EnumDescriptorProto{
+	return &descriptorpb.EnumDescriptorProto{
 		Name:          proto.String(eb.name),
 		Options:       eb.Options,
 		Value:         values,
@@ -288,19 +288,19 @@ func (eb *EnumBuilder) buildProto(path []int32, sourceInfo *dpb.SourceCodeInfo) 
 // builder. If there are any problems constructing the descriptor, including
 // resolving symbols referenced by the builder or failing to meet certain
 // validation rules, an error is returned.
-func (eb *EnumBuilder) Build() (*desc.EnumDescriptor, error) {
+func (eb *EnumBuilder) Build() (protoreflect.EnumDescriptor, error) {
 	ed, err := eb.BuildDescriptor()
 	if err != nil {
 		return nil, err
 	}
-	return ed.(*desc.EnumDescriptor), nil
+	return ed.(protoreflect.EnumDescriptor), nil
 }
 
 // BuildDescriptor constructs an enum descriptor based on the contents of this
 // enum builder. Most usages will prefer Build() instead, whose return type
 // is a concrete descriptor type. This method is present to satisfy the Builder
 // interface.
-func (eb *EnumBuilder) BuildDescriptor() (desc.Descriptor, error) {
+func (eb *EnumBuilder) BuildDescriptor() (protoreflect.Descriptor, error) {
 	return doBuild(eb, BuilderOptions{})
 }
 
@@ -314,7 +314,7 @@ type EnumValueBuilder struct {
 
 	number    int32
 	numberSet bool
-	Options   *dpb.EnumValueOptions
+	Options   *descriptorpb.EnumValueOptions
 }
 
 // NewEnumValue creates a new EnumValueBuilder for an enum value with the given
@@ -336,20 +336,20 @@ func NewEnumValue(name string) *EnumValueBuilder {
 // This means that enum value builders created from descriptors do not need to
 // be explicitly assigned to a file in order to preserve the original enum
 // value's package name.
-func FromEnumValue(evd *desc.EnumValueDescriptor) (*EnumValueBuilder, error) {
-	if fb, err := FromFile(evd.GetFile()); err != nil {
+func FromEnumValue(evd protoreflect.EnumValueDescriptor) (*EnumValueBuilder, error) {
+	if fb, err := FromFile(evd.ParentFile()); err != nil {
 		return nil, err
-	} else if evb, ok := fb.findFullyQualifiedElement(evd.GetFullyQualifiedName()).(*EnumValueBuilder); ok {
+	} else if evb, ok := fb.findFullyQualifiedElement(evd.FullName()).(*EnumValueBuilder); ok {
 		return evb, nil
 	} else {
-		return nil, fmt.Errorf("could not find enum value %s after converting file %q to builder", evd.GetFullyQualifiedName(), evd.GetFile().GetName())
+		return nil, fmt.Errorf("could not find enum value %s after converting file %q to builder", evd.FullName(), evd.ParentFile().Name())
 	}
 }
 
-func fromEnumValue(evd *desc.EnumValueDescriptor) (*EnumValueBuilder, error) {
-	evb := NewEnumValue(evd.GetName())
-	evb.Options = evd.GetEnumValueOptions()
-	evb.number = evd.GetNumber()
+func fromEnumValue(evd protoreflect.EnumValueDescriptor) (*EnumValueBuilder, error) {
+	evb := NewEnumValue(evd.Name())
+	evb.Options = evd.Options().(*descriptorpb.EnumValueOptions)
+	evb.number = evd.Number()
 	evb.numberSet = true
 	setComments(&evb.comments, evd.GetSourceInfo())
 
@@ -403,7 +403,7 @@ func (evb *EnumValueBuilder) renamedChild(b Builder, oldName string) error {
 
 // SetOptions sets the enum value options for this enum value and returns the
 // enum value, for method chaining.
-func (evb *EnumValueBuilder) SetOptions(options *dpb.EnumValueOptions) *EnumValueBuilder {
+func (evb *EnumValueBuilder) SetOptions(options *descriptorpb.EnumValueOptions) *EnumValueBuilder {
 	evb.Options = options
 	return evb
 }
@@ -438,10 +438,10 @@ func (evb *EnumValueBuilder) SetNumber(number int32) *EnumValueBuilder {
 	return evb
 }
 
-func (evb *EnumValueBuilder) buildProto(path []int32, sourceInfo *dpb.SourceCodeInfo) (*dpb.EnumValueDescriptorProto, error) {
+func (evb *EnumValueBuilder) buildProto(path []int32, sourceInfo *descriptorpb.SourceCodeInfo) (*descriptorpb.EnumValueDescriptorProto, error) {
 	addCommentsTo(sourceInfo, path, &evb.comments)
 
-	return &dpb.EnumValueDescriptorProto{
+	return &descriptorpb.EnumValueDescriptorProto{
 		Name:    proto.String(evb.name),
 		Number:  proto.Int32(evb.number),
 		Options: evb.Options,
@@ -452,18 +452,18 @@ func (evb *EnumValueBuilder) buildProto(path []int32, sourceInfo *dpb.SourceCode
 // value builder. If there are any problems constructing the descriptor,
 // including resolving symbols referenced by the builder or failing to meet
 // certain validation rules, an error is returned.
-func (evb *EnumValueBuilder) Build() (*desc.EnumValueDescriptor, error) {
+func (evb *EnumValueBuilder) Build() (protoreflect.EnumValueDescriptor, error) {
 	evd, err := evb.BuildDescriptor()
 	if err != nil {
 		return nil, err
 	}
-	return evd.(*desc.EnumValueDescriptor), nil
+	return evd.(protoreflect.EnumValueDescriptor), nil
 }
 
 // BuildDescriptor constructs an enum value descriptor based on the contents of
 // this enum value builder. Most usages will prefer Build() instead, whose
 // return type is a concrete descriptor type. This method is present to satisfy
 // the Builder interface.
-func (evb *EnumValueBuilder) BuildDescriptor() (desc.Descriptor, error) {
+func (evb *EnumValueBuilder) BuildDescriptor() (protoreflect.Descriptor, error) {
 	return doBuild(evb, BuilderOptions{})
 }

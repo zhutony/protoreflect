@@ -2,33 +2,47 @@ package builder
 
 import (
 	"fmt"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/types/dynamicpb"
 	"reflect"
 	"strings"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 
 	"github.com/jhump/protoreflect/desc"
-	"github.com/jhump/protoreflect/dynamic"
 )
 
 type dependencies struct {
-	descs map[*desc.FileDescriptor]struct{}
-	exts  dynamic.ExtensionRegistry
+	descs map[protoreflect.FileDescriptor]struct{}
+	exts  protoregistry.Types
 }
 
 func newDependencies() *dependencies {
 	return &dependencies{
-		descs: map[*desc.FileDescriptor]struct{}{},
+		descs: map[protoreflect.FileDescriptor]struct{}{},
 	}
 }
 
-func (d *dependencies) add(fd *desc.FileDescriptor) {
+func (d *dependencies) add(fd protoreflect.FileDescriptor) {
 	if _, ok := d.descs[fd]; ok {
 		// already added
 		return
 	}
 	d.descs[fd] = struct{}{}
-	d.exts.AddExtensionsFromFile(fd)
+	addExts(fd, d.exts)
+}
+
+func addExts(ns namespace, reg protoregistry.Types) {
+	exts := ns.Extensions()
+	for i := 0; i < exts.Len(); i++ {
+		_ = reg.RegisterExtension(dynamicpb.NewExtensionType(exts.Get(i)))
+	}
+	msgs := ns.Messages()
+	for i := 0; i < msgs.Len(); i++ {
+		addExts(msgs.Get(i), reg)
+	}
 }
 
 // dependencyResolver is the work-horse for converting a tree of builders into a
@@ -37,20 +51,20 @@ func (d *dependencies) add(fd *desc.FileDescriptor) {
 // references to other already-built descriptors). The result of resolution is a
 // file descriptor (or an error).
 type dependencyResolver struct {
-	resolvedRoots map[Builder]*desc.FileDescriptor
+	resolvedRoots map[Builder]protoreflect.FileDescriptor
 	seen          map[Builder]struct{}
 	opts          BuilderOptions
 }
 
 func newResolver(opts BuilderOptions) *dependencyResolver {
 	return &dependencyResolver{
-		resolvedRoots: map[Builder]*desc.FileDescriptor{},
+		resolvedRoots: map[Builder]protoreflect.FileDescriptor{},
 		seen:          map[Builder]struct{}{},
 		opts:          opts,
 	}
 }
 
-func (r *dependencyResolver) resolveElement(b Builder, seen []Builder) (*desc.FileDescriptor, error) {
+func (r *dependencyResolver) resolveElement(b Builder, seen []Builder) (protoreflect.FileDescriptor, error) {
 	b = getRoot(b)
 
 	if fd, ok := r.resolvedRoots[b]; ok {
@@ -69,7 +83,7 @@ func (r *dependencyResolver) resolveElement(b Builder, seen []Builder) (*desc.Fi
 	}
 	seen = append(seen, b)
 
-	var fd *desc.FileDescriptor
+	var fd protoreflect.FileDescriptor
 	var err error
 	switch b := b.(type) {
 	case *FileBuilder:
@@ -84,7 +98,7 @@ func (r *dependencyResolver) resolveElement(b Builder, seen []Builder) (*desc.Fi
 	return fd, nil
 }
 
-func (r *dependencyResolver) resolveFile(fb *FileBuilder, root Builder, seen []Builder) (*desc.FileDescriptor, error) {
+func (r *dependencyResolver) resolveFile(fb *FileBuilder, root Builder, seen []Builder) (protoreflect.FileDescriptor, error) {
 	deps := newDependencies()
 	// add explicit imports first
 	for fd := range fb.explicitImports {
@@ -124,7 +138,7 @@ func (r *dependencyResolver) resolveFile(fb *FileBuilder, root Builder, seen []B
 		return nil, err
 	}
 
-	depSlice := make([]*desc.FileDescriptor, 0, len(deps.descs))
+	depSlice := make([]protoreflect.FileDescriptor, 0, len(deps.descs))
 	for dep := range deps.descs {
 		depSlice = append(depSlice, dep)
 	}
@@ -135,31 +149,42 @@ func (r *dependencyResolver) resolveFile(fb *FileBuilder, root Builder, seen []B
 	}
 
 	// make sure this file name doesn't collide with any of its dependencies
-	fileNames := map[string]struct{}{}
+	fileNames := map[protoreflect.Name]struct{}{}
 	for _, d := range depSlice {
 		addFileNames(d, fileNames)
-		fileNames[d.GetName()] = struct{}{}
+		fileNames[d.Name()] = struct{}{}
 	}
 	unique := makeUnique(fp.GetName(), fileNames)
 	if unique != fp.GetName() {
 		fp.Name = proto.String(unique)
 	}
 
-	return desc.CreateFileDescriptor(fp, depSlice...)
+	// TODO: protoregistry.Files enforces harder constraints than our v1
+	// implementation in desc... should we keep desc package as our own
+	// way to turn protos into descriptors, just for softer constraints?
+	var files protoregistry.Files
+	for _, dep := range depSlice {
+		if err := files.RegisterFile(dep); err != nil {
+			return nil, err
+		}
+	}
+
+	return protodesc.NewFile(fp, &files)
 }
 
-func addFileNames(fd *desc.FileDescriptor, files map[string]struct{}) {
-	if _, ok := files[fd.GetName()]; ok {
+func addFileNames(fd protoreflect.FileDescriptor, files map[protoreflect.Name]struct{}) {
+	if _, ok := files[fd.Name()]; ok {
 		// already added
 		return
 	}
-	files[fd.GetName()] = struct{}{}
-	for _, d := range fd.GetDependencies() {
-		addFileNames(d, files)
+	files[fd.Name()] = struct{}{}
+	deps := fd.Imports()
+	for i := 0; i < deps.Len(); i++ {
+		addFileNames(deps.Get(i).FileDescriptor, files)
 	}
 }
 
-func (r *dependencyResolver) resolveSyntheticFile(b Builder, seen []Builder) (*desc.FileDescriptor, error) {
+func (r *dependencyResolver) resolveSyntheticFile(b Builder, seen []Builder) (protoreflect.FileDescriptor, error) {
 	// find ancestor to temporarily attach to new file
 	curr := b
 	for curr.GetParent() != nil {
@@ -236,7 +261,7 @@ func (r *dependencyResolver) resolveTypesInExtension(root Builder, seen []Builde
 		return err
 	}
 	if exb.foreignExtendee != nil {
-		deps.add(exb.foreignExtendee.GetFile())
+		deps.add(exb.foreignExtendee.ParentFile())
 	} else if err := r.resolveType(root, seen, exb.localExtendee, deps); err != nil {
 		return err
 	}
@@ -257,7 +282,7 @@ func (r *dependencyResolver) resolveTypesInService(root Builder, seen []Builder,
 
 func (r *dependencyResolver) resolveRpcType(root Builder, seen []Builder, t *RpcType, deps *dependencies) error {
 	if t.foreignType != nil {
-		deps.add(t.foreignType.GetFile())
+		deps.add(t.foreignType.ParentFile())
 	} else {
 		return r.resolveType(root, seen, t.localType, deps)
 	}
@@ -266,9 +291,9 @@ func (r *dependencyResolver) resolveRpcType(root Builder, seen []Builder, t *Rpc
 
 func (r *dependencyResolver) resolveTypesInField(root Builder, seen []Builder, deps *dependencies, flb *FieldBuilder) error {
 	if flb.fieldType.foreignMsgType != nil {
-		deps.add(flb.fieldType.foreignMsgType.GetFile())
+		deps.add(flb.fieldType.foreignMsgType.ParentFile())
 	} else if flb.fieldType.foreignEnumType != nil {
-		deps.add(flb.fieldType.foreignEnumType.GetFile())
+		deps.add(flb.fieldType.foreignEnumType.ParentFile())
 	} else if flb.fieldType.localMsgType != nil {
 		if flb.fieldType.localMsgType == flb.msgType {
 			return r.resolveTypesInMessage(root, seen, deps, flb.msgType)
@@ -389,7 +414,18 @@ func (r *dependencyResolver) resolveTypesInOptions(root Builder, deps *dependenc
 		return nil
 	}
 
-	msgName := proto.MessageName(opts)
+	msgName := opts.ProtoReflect().Descriptor().FullName()
+
+	opts.ProtoReflect().Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		// make sure we have dependencies on all files that declare custom options
+		if fd.IsExtension() {
+			deps.add(fd.ParentFile())
+		}
+		return true
+	})
+
+	// we also have to scrutinize the unknown fields on options, for unrecognized options
+	
 
 	extdescs, err := proto.ExtensionDescs(opts)
 	if err != nil {
@@ -428,7 +464,7 @@ func (r *dependencyResolver) resolveTypesInOptions(root Builder, deps *dependenc
 	return nil
 }
 
-func findExtension(b Builder, messageName string, extTag int32) bool {
+func findExtension(b Builder, messageName protoreflect.FullName, extTag protoreflect.FieldNumber) bool {
 	if fb, ok := b.(*FileBuilder); ok && findExtensionInFile(fb, messageName, extTag) {
 		return true
 	}
@@ -438,7 +474,7 @@ func findExtension(b Builder, messageName string, extTag int32) bool {
 	return false
 }
 
-func findExtensionInFile(fb *FileBuilder, messageName string, extTag int32) bool {
+func findExtensionInFile(fb *FileBuilder, messageName protoreflect.FullName, extTag protoreflect.FieldNumber) bool {
 	for _, extb := range fb.extensions {
 		if extb.GetExtendeeTypeName() == messageName && extb.number == extTag {
 			return true
@@ -452,7 +488,7 @@ func findExtensionInFile(fb *FileBuilder, messageName string, extTag int32) bool
 	return false
 }
 
-func findExtensionInMessage(mb *MessageBuilder, messageName string, extTag int32) bool {
+func findExtensionInMessage(mb *MessageBuilder, messageName protoreflect.FullName, extTag protoreflect.FieldNumber) bool {
 	for _, extb := range mb.nestedExtensions {
 		if extb.GetExtendeeTypeName() == messageName && extb.number == extTag {
 			return true

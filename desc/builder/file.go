@@ -6,10 +6,10 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/golang/protobuf/proto"
-	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
-	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/desc/internal"
 )
 
@@ -20,11 +20,11 @@ func uniqueFileName() string {
 	return fmt.Sprintf("{generated-file-%04x}.proto", i)
 }
 
-func makeUnique(name string, existingNames map[string]struct{}) string {
+func makeUnique(name string, existingNames map[protoreflect.Name]struct{}) string {
 	i := 1
 	n := name
 	for {
-		if _, ok := existingNames[n]; !ok {
+		if _, ok := existingNames[protoreflect.Name(n)]; !ok {
 			return n
 		}
 		n = fmt.Sprintf("%s(%d)", name, i)
@@ -47,7 +47,7 @@ type FileBuilder struct {
 
 	IsProto3 bool
 	Package  string
-	Options  *dpb.FileOptions
+	Options  *descriptorpb.FileOptions
 
 	comments        Comments
 	SyntaxComments  Comments
@@ -60,7 +60,7 @@ type FileBuilder struct {
 	symbols    map[string]Builder
 
 	explicitDeps    map[*FileBuilder]struct{}
-	explicitImports map[*desc.FileDescriptor]struct{}
+	explicitImports map[protoreflect.FileDescriptor]struct{}
 }
 
 // NewFile creates a new FileBuilder for a file with the given name. The
@@ -77,7 +77,7 @@ func NewFile(name string) *FileBuilder {
 // the given descriptor included it. Instead, comments are extracted from the
 // given descriptor's source info (if present) and, when built, the resulting
 // descriptor will have just the comment info (no location information).
-func FromFile(fd *desc.FileDescriptor) (*FileBuilder, error) {
+func FromFile(fd protoreflect.FileDescriptor) (*FileBuilder, error) {
 	fb := NewFile(fd.GetName())
 	fb.IsProto3 = fd.IsProto3()
 	fb.Package = fd.GetPackage()
@@ -100,8 +100,8 @@ func FromFile(fd *desc.FileDescriptor) (*FileBuilder, error) {
 		fb.AddImportedDependency(dep)
 	}
 
-	localMessages := map[*desc.MessageDescriptor]*MessageBuilder{}
-	localEnums := map[*desc.EnumDescriptor]*EnumBuilder{}
+	localMessages := map[protoreflect.MessageDescriptor]*MessageBuilder{}
+	localEnums := map[protoreflect.EnumDescriptor]*EnumBuilder{}
 
 	for _, md := range fd.GetMessageTypes() {
 		if mb, err := fromMessage(md, localMessages, localEnums); err != nil {
@@ -150,7 +150,7 @@ func FromFile(fd *desc.FileDescriptor) (*FileBuilder, error) {
 	return fb, nil
 }
 
-func updateLocalRefsInMessage(mb *MessageBuilder, localMessages map[*desc.MessageDescriptor]*MessageBuilder, localEnums map[*desc.EnumDescriptor]*EnumBuilder) {
+func updateLocalRefsInMessage(mb *MessageBuilder, localMessages map[protoreflect.MessageDescriptor]*MessageBuilder, localEnums map[protoreflect.EnumDescriptor]*EnumBuilder) {
 	for _, b := range mb.fieldsAndOneOfs {
 		if flb, ok := b.(*FieldBuilder); ok {
 			updateLocalRefsInField(flb, localMessages, localEnums)
@@ -169,7 +169,7 @@ func updateLocalRefsInMessage(mb *MessageBuilder, localMessages map[*desc.Messag
 	}
 }
 
-func updateLocalRefsInField(flb *FieldBuilder, localMessages map[*desc.MessageDescriptor]*MessageBuilder, localEnums map[*desc.EnumDescriptor]*EnumBuilder) {
+func updateLocalRefsInField(flb *FieldBuilder, localMessages map[protoreflect.MessageDescriptor]*MessageBuilder, localEnums map[protoreflect.EnumDescriptor]*EnumBuilder) {
 	if flb.fieldType.foreignMsgType != nil {
 		if mb, ok := localMessages[flb.fieldType.foreignMsgType]; ok {
 			flb.fieldType.foreignMsgType = nil
@@ -193,7 +193,7 @@ func updateLocalRefsInField(flb *FieldBuilder, localMessages map[*desc.MessageDe
 	}
 }
 
-func updateLocalRefsInRpcType(rpcType *RpcType, localMessages map[*desc.MessageDescriptor]*MessageBuilder) {
+func updateLocalRefsInRpcType(rpcType *RpcType, localMessages map[protoreflect.MessageDescriptor]*MessageBuilder) {
 	if rpcType.foreignType != nil {
 		if mb, ok := localMessages[rpcType.foreignType]; ok {
 			rpcType.foreignType = nil
@@ -590,9 +590,9 @@ func (fb *FileBuilder) AddDependency(dep *FileBuilder) *FileBuilder {
 //
 // Knowledge of custom options can also be provided by using BuildOptions with
 // an ExtensionRegistry, when building the file.
-func (fb *FileBuilder) AddImportedDependency(dep *desc.FileDescriptor) *FileBuilder {
+func (fb *FileBuilder) AddImportedDependency(dep protoreflect.FileDescriptor) *FileBuilder {
 	if fb.explicitImports == nil {
-		fb.explicitImports = map[*desc.FileDescriptor]struct{}{}
+		fb.explicitImports = map[protoreflect.FileDescriptor]struct{}{}
 	}
 	fb.explicitImports[dep] = struct{}{}
 	return fb
@@ -600,7 +600,7 @@ func (fb *FileBuilder) AddImportedDependency(dep *desc.FileDescriptor) *FileBuil
 
 // SetOptions sets the file options for this file and returns the file, for
 // method chaining.
-func (fb *FileBuilder) SetOptions(options *dpb.FileOptions) *FileBuilder {
+func (fb *FileBuilder) SetOptions(options *descriptorpb.FileOptions) *FileBuilder {
 	fb.Options = options
 	return fb
 }
@@ -619,7 +619,7 @@ func (fb *FileBuilder) SetProto3(isProto3 bool) *FileBuilder {
 	return fb
 }
 
-func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescriptorProto, error) {
+func (fb *FileBuilder) buildProto(deps []protoreflect.FileDescriptor) (*descriptorpb.FileDescriptorProto, error) {
 	name := fb.name
 	if name == "" {
 		name = uniqueFileName()
@@ -634,7 +634,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 	}
 
 	path := make([]int32, 0, 10)
-	sourceInfo := dpb.SourceCodeInfo{}
+	sourceInfo := descriptorpb.SourceCodeInfo{}
 	addCommentsTo(&sourceInfo, path, &fb.comments)
 	addCommentsTo(&sourceInfo, append(path, internal.File_syntaxTag), &fb.SyntaxComments)
 	addCommentsTo(&sourceInfo, append(path, internal.File_packageTag), &fb.PackageComments)
@@ -645,7 +645,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 	}
 	sort.Strings(imports)
 
-	messages := make([]*dpb.DescriptorProto, 0, len(fb.messages))
+	messages := make([]*descriptorpb.DescriptorProto, 0, len(fb.messages))
 	for _, mb := range fb.messages {
 		path := append(path, internal.File_messagesTag, int32(len(messages)))
 		if md, err := mb.buildProto(path, &sourceInfo); err != nil {
@@ -655,7 +655,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 		}
 	}
 
-	enums := make([]*dpb.EnumDescriptorProto, 0, len(fb.enums))
+	enums := make([]*descriptorpb.EnumDescriptorProto, 0, len(fb.enums))
 	for _, eb := range fb.enums {
 		path := append(path, internal.File_enumsTag, int32(len(enums)))
 		if ed, err := eb.buildProto(path, &sourceInfo); err != nil {
@@ -665,7 +665,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 		}
 	}
 
-	extensions := make([]*dpb.FieldDescriptorProto, 0, len(fb.extensions))
+	extensions := make([]*descriptorpb.FieldDescriptorProto, 0, len(fb.extensions))
 	for _, exb := range fb.extensions {
 		path := append(path, internal.File_extensionsTag, int32(len(extensions)))
 		if exd, err := exb.buildProto(path, &sourceInfo); err != nil {
@@ -675,7 +675,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 		}
 	}
 
-	services := make([]*dpb.ServiceDescriptorProto, 0, len(fb.services))
+	services := make([]*descriptorpb.ServiceDescriptorProto, 0, len(fb.services))
 	for _, sb := range fb.services {
 		path := append(path, internal.File_servicesTag, int32(len(services)))
 		if sd, err := sb.buildProto(path, &sourceInfo); err != nil {
@@ -685,7 +685,7 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 		}
 	}
 
-	return &dpb.FileDescriptorProto{
+	return &descriptorpb.FileDescriptorProto{
 		Name:           proto.String(name),
 		Package:        pkg,
 		Dependency:     imports,
@@ -703,18 +703,18 @@ func (fb *FileBuilder) buildProto(deps []*desc.FileDescriptor) (*dpb.FileDescrip
 // builder. If there are any problems constructing the descriptor, including
 // resolving symbols referenced by the builder or failing to meet certain
 // validation rules, an error is returned.
-func (fb *FileBuilder) Build() (*desc.FileDescriptor, error) {
+func (fb *FileBuilder) Build() (protoreflect.FileDescriptor, error) {
 	fd, err := fb.BuildDescriptor()
 	if err != nil {
 		return nil, err
 	}
-	return fd.(*desc.FileDescriptor), nil
+	return fd.(protoreflect.FileDescriptor), nil
 }
 
 // BuildDescriptor constructs a file descriptor based on the contents of this
 // file builder. Most usages will prefer Build() instead, whose return type is a
 // concrete descriptor type. This method is present to satisfy the Builder
 // interface.
-func (fb *FileBuilder) BuildDescriptor() (desc.Descriptor, error) {
+func (fb *FileBuilder) BuildDescriptor() (protoreflect.Descriptor, error) {
 	return doBuild(fb, BuilderOptions{})
 }
