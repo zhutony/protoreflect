@@ -3,6 +3,10 @@ package protoparse
 import (
 	"bytes"
 	"errors"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/dynamicpb"
 	"io"
 	"io/ioutil"
 	"os"
@@ -11,6 +15,8 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	dpb "github.com/golang/protobuf/protoc-gen-go/descriptor"
+	"google.golang.org/protobuf/encoding/protojson"
+	newproto "google.golang.org/protobuf/proto"
 
 	"github.com/jhump/protoreflect/codec"
 	"github.com/jhump/protoreflect/desc"
@@ -384,4 +390,154 @@ message Foo {
 	fieldVal, err := buf.DecodeVarint()
 	testutil.Ok(t, err)
 	testutil.Eq(t, uint64(123), fieldVal)
+}
+
+func TestOptionsToJSONExperiment(t *testing.T) {
+	accessor := FileContentsFromMap(map[string]string{
+		"test.proto": `
+syntax = "proto3";
+import "google/protobuf/descriptor.proto";
+extend google.protobuf.MessageOptions {
+    Foo foo = 30303;
+    int64 bar = 30304;
+    string baz = 30305;
+}
+message Foo {
+  option (bar) = 123;
+  option (.baz) = "foo";
+  option (.foo).frob = "gyzmeaux";
+  option (foo).nitz.blah = 123;
+
+  string frob = 1;
+  Foo nitz = 2;
+  int32 blah = 3;
+}
+`,
+	})
+
+	p := Parser{Accessor: accessor}
+	fds, err := p.ParseFiles("test.proto")
+	testutil.Ok(t, err)
+
+	fd := fds[0].AsFileDescriptorProto()
+	js := protojson.Format(fd)
+	testutil.Ok(t, err)
+
+	t.Logf("BEFORE:\n%s", js)
+
+	// secret sauce:
+
+	var types protoregistry.Types
+	var files protoregistry.Files
+	err = fileToRegistry(fds[0], &types, &files, map[*desc.FileDescriptor]struct{}{})
+	testutil.Ok(t, err)
+	err = reparseUnrecognized(fd.ProtoReflect(), &types)
+	testutil.Ok(t, err)
+	js = protojson.Format(fd)
+	testutil.Ok(t, err)
+
+	t.Logf("AFTER:\n%s", js)
+}
+
+func fileToRegistry(fd *desc.FileDescriptor, types *protoregistry.Types, files *protoregistry.Files, seen map[*desc.FileDescriptor]struct{}) error {
+	if _, ok := seen[fd]; ok {
+		return nil
+	}
+	seen[fd] = struct{}{}
+	for _, dep := range fd.GetDependencies() {
+		if err := fileToRegistry(dep, types, files, seen); err != nil {
+			return err
+		}
+	}
+	refFd, err := protodesc.NewFile(fd.AsFileDescriptorProto(), files)
+	if err != nil {
+		return err
+	}
+	if err := files.RegisterFile(refFd); err != nil {
+		return err
+	}
+	return contentsToRegistry(refFd, types)
+}
+
+type descContainer interface {
+	Messages() protoreflect.MessageDescriptors
+	Enums() protoreflect.EnumDescriptors
+	Extensions() protoreflect.ExtensionDescriptors
+}
+
+func contentsToRegistry(d descContainer, reg *protoregistry.Types) error {
+	for i := 0; i < d.Messages().Len(); i++ {
+		md := d.Messages().Get(i)
+		msgType := dynamicpb.NewMessageType(md)
+		if err := reg.RegisterMessage(msgType); err != nil {
+			return err
+		}
+		if err := contentsToRegistry(md, reg); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < d.Enums().Len(); i++ {
+		enType := dynamicpb.NewEnumType(d.Enums().Get(i))
+		if err := reg.RegisterEnum(enType); err != nil {
+			return err
+		}
+	}
+	for i := 0; i < d.Extensions().Len(); i++ {
+		enType := dynamicpb.NewExtensionType(d.Extensions().Get(i))
+		if err := reg.RegisterExtension(enType); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reparseUnrecognized(msg protoreflect.Message, reg protoregistry.ExtensionTypeResolver) error {
+	unk := msg.GetUnknown()
+	if len(unk) > 0 {
+		msg.SetUnknown(nil)
+		opts := newproto.UnmarshalOptions{Merge: true, Resolver: reg}
+		if err := opts.Unmarshal(unk, msg.Interface()); err != nil {
+			return err
+		}
+	}
+
+	var err error
+	msg.Range(func(fd protoreflect.FieldDescriptor, val protoreflect.Value) bool {
+		err = reparseUnrecognizedInField(fd, reg, val)
+		return err == nil
+	})
+
+	return err
+}
+
+func reparseUnrecognizedInField(fd protoreflect.FieldDescriptor, reg protoregistry.ExtensionTypeResolver, val protoreflect.Value) error {
+	if fd.IsMap() {
+		valDesc := fd.MapValue()
+		if valDesc.Kind() != protoreflect.MessageKind && valDesc.Kind() != protoreflect.GroupKind {
+			// nothing to reparse
+			return nil
+		}
+		var err error
+		val.Map().Range(func(k protoreflect.MapKey, v protoreflect.Value) bool {
+			err = reparseUnrecognized(v.Message(), reg)
+			return err == nil
+		})
+		return err
+	}
+
+	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+		// nothing to reparse
+		return nil
+	}
+
+	if fd.IsList() {
+		for i := 0; i < val.List().Len(); i++ {
+			if err := reparseUnrecognized(val.List().Get(i).Message(), reg); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return reparseUnrecognized(val.Message(), reg)
 }
