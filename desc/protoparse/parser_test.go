@@ -3,9 +3,11 @@ package protoparse
 import (
 	"bytes"
 	"errors"
+	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 	"io"
 	"io/ioutil"
@@ -419,13 +421,14 @@ message Foo {
 	fds, err := p.ParseFiles("test.proto")
 	testutil.Ok(t, err)
 
+	// marshal to JSON loses all custom options since they are unrecognized fields:
+
 	fd := fds[0].AsFileDescriptorProto()
 	js := protojson.Format(fd)
-	testutil.Ok(t, err)
 
 	t.Logf("BEFORE:\n%s", js)
 
-	// secret sauce:
+	// secret sauce: convert descriptors to APIv2 ExtensionTypeResolver and re-parse unrecognized fields
 
 	var types protoregistry.Types
 	var files protoregistry.Files
@@ -434,9 +437,78 @@ message Foo {
 	err = reparseUnrecognized(fd.ProtoReflect(), &types)
 	testutil.Ok(t, err)
 	js = protojson.Format(fd)
-	testutil.Ok(t, err)
 
 	t.Logf("AFTER:\n%s", js)
+}
+
+func TestOptionsFromJSONExperiment(t *testing.T) {
+	accessor := FileContentsFromMap(map[string]string{
+		"test.proto": `
+syntax = "proto3";
+import "google/protobuf/descriptor.proto";
+extend google.protobuf.MessageOptions {
+    Foo foo = 30303;
+    int64 bar = 30304;
+    string baz = 30305;
+}
+message Foo {
+  option (bar) = 123;
+  option (.baz) = "foo";
+  option (.foo).frob = "gyzmeaux";
+  option (foo).nitz.blah = 123;
+
+  string frob = 1;
+  Foo nitz = 2;
+  int32 blah = 3;
+}
+`,
+	})
+
+	p := Parser{Accessor: accessor}
+	fds, err := p.ParseFiles("test.proto")
+	testutil.Ok(t, err)
+
+	fdSet := desc.ToFileDescriptorSet(fds...)
+	var types protoregistry.Types
+	var files protoregistry.Files
+	err = fileToRegistry(fds[0], &types, &files, map[*desc.FileDescriptor]struct{}{})
+	testutil.Ok(t, err)
+	err = reparseUnrecognized(fdSet.ProtoReflect(), &types)
+	testutil.Ok(t, err)
+	js, err := protojson.Marshal(fdSet)
+	testutil.Ok(t, err)
+
+	// unmarshal from JSON loses all custom options since they are unrecognized fields:
+
+	var roundTripped descriptorpb.FileDescriptorSet
+	opts := protojson.UnmarshalOptions{DiscardUnknown: true}
+	err = opts.Unmarshal(js, &roundTripped)
+	testutil.Ok(t, err)
+
+	t.Logf("BEFORE:\n%s", prototext.Format(roundTripped.File[1]))
+
+	// secret sauce: unfortunately, have to double-parse (no way around this if a file *uses*
+	// custom options that it declares; but if it only uses custom options from dependencies,
+	// we could avoid second parse if we do a streaming parse, where we build extension type
+	// resolver as we go)
+
+	types = protoregistry.Types{}
+	files = protoregistry.Files{}
+	for _, fd := range roundTripped.File {
+		file, err := protodesc.NewFile(fd, &files)
+		testutil.Ok(t, err)
+		err = files.RegisterFile(file)
+		testutil.Ok(t, err)
+		err = contentsToRegistry(file, &types)
+		testutil.Ok(t, err)
+	}
+
+	opts.Resolver = &types
+	roundTripped.Reset()
+	err = opts.Unmarshal(js, &roundTripped)
+	testutil.Ok(t, err)
+
+	t.Logf("AFTER:\n%s", prototext.Format(roundTripped.File[1]))
 }
 
 func fileToRegistry(fd *desc.FileDescriptor, types *protoregistry.Types, files *protoregistry.Files, seen map[*desc.FileDescriptor]struct{}) error {
