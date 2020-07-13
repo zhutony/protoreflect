@@ -29,4 +29,4 @@ before_install:
   - test ! -d $GOPATH/src/github.com/jhump/protoreflect && mv $TRAVIS_BUILD_DIR $GOPATH/src/github.com/jhump/protoreflect || true
 
 script:
-  - if [[ "$VET" = 1 ]]; then make ci; else make deps test; fi
+  - if [[ "$TRAVIS_OS_NAME" = windows ]]; then go test ./...; elif [[ "$VET" = 1 ]]; then make ci; else make deps test; fi
